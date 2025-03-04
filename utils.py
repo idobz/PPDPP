@@ -1,10 +1,10 @@
-import pickle
-import numpy as np
-import random
-import torch
 import os
+import pickle
+import random
 import sys
 
+import numpy as np
+import torch
 
 TMP_DIR = {
     'esc': './tmp/esc',
@@ -18,7 +18,6 @@ def set_random_seed(seed):
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
-
 
 
 # Disable
@@ -39,16 +38,12 @@ def load_dataset(data_name):
 
 
 def set_cuda(args):
-    use_cuda = torch.cuda.is_available()
-    if use_cuda:
-        torch.cuda.manual_seed(args.seed)
-        torch.backends.cudnn.deterministic = True
-    devices_id = [int(device_id) for device_id in args.gpu.split()]
-    device = (
-        torch.device("cuda:{}".format(str(devices_id[0])))
-        if use_cuda
-        else torch.device("cpu")
+    device = torch.device(
+        "cuda"
+        if torch.cuda.is_available()
+        else "mps" if torch.backends.mps.is_available() else "cpu"
     )
+    devices_id = [int(device_id) for device_id in args.gpu.split()]
     return device, devices_id
 
 

@@ -1,11 +1,11 @@
 import argparse
+import json
 import logging
 import os
 
 import torch
 from pytorch_transformers import WarmupLinearSchedule
 from sklearn.metrics import f1_score, precision_score, recall_score
-from tensorboardX import SummaryWriter
 from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm, trange
@@ -19,6 +19,7 @@ from transformers import (
 
 import data_reader
 import utils
+import wandb
 from agent import PPDPP
 
 # python sft.py --gpu="0 1" --do_train --overwrite_output_dir --per_gpu_train_batch_size=8 --per_gpu_eval_batch_size=8
@@ -57,7 +58,8 @@ def collate_fn(data):
 
 
 def train(args, train_dataset, model, tokenizer):
-    tb_writer = SummaryWriter()
+    run = wandb.init(project="PPDPP", config=args)
+    wandb.watch(model, log_freq=100)
 
     args.train_batch_size = args.per_gpu_train_batch_size * max(1, len(args.device_id))
     train_dataloader = DataLoader(
@@ -118,7 +120,7 @@ def train(args, train_dataset, model, tokenizer):
     logging.info("  Gradient Accumulation steps = %d", args.gradient_accumulation_steps)
     logging.info("  Total optimization steps = %d", t_total)
 
-    tr_loss, logging_loss = 0.0, 0.0
+    tr_loss = 0.0
     model.zero_grad()
     train_iterator = trange(int(args.num_train_epochs), desc="Epoch")
     utils.set_random_seed(
@@ -159,10 +161,7 @@ def train(args, train_dataset, model, tokenizer):
                 model.zero_grad()
             global_step += 1
 
-        tb_writer.add_scalar("lr", scheduler.get_lr()[0], global_step)
-        tb_writer.add_scalar("loss", (tr_loss - logging_loss) / (step + 1), global_step)
-        print("loss: {}".format((tr_loss - logging_loss) / (step + 1)))
-        logging_loss = tr_loss
+            wandb.log({"loss": loss.item()}, step=global_step)
 
         # Log metrics
         results = evaluate(args, model, tokenizer, save_output=True)
@@ -183,7 +182,7 @@ def train(args, train_dataset, model, tokenizer):
             torch.save(args, os.path.join(output_dir, "training_args.bin"))
             logging.info("Saving model checkpoint to %s", output_dir)
 
-    tb_writer.close()
+    run.finish()
 
     return global_step, tr_loss / global_step
 
@@ -261,116 +260,46 @@ def evaluate(args, model, tokenizer, save_output=False):
 
 
 def main():
-    # Set up argument parser for command-line options
-    parser = argparse.ArgumentParser(description="train.py")
+    # Load configuration from file or use default
+    config_file = "data/config/sft_config.json"
+    if os.path.exists(config_file):
+        with open(config_file) as f:
+            config = json.load(f)
+    else:
+        # Use default configuration if file doesn't exist
+        config = {
+            "data_name": "cb",
+            "set_name": "valid",
+            "model_name": "roberta",
+            "model_name_or_path": "roberta-large",
+            "output_dir": "models",
+            "data_dir": "./data",
+            "cache_dir": "./cache",
+            "do_train": True,
+            "do_eval": True,
+            "overwrite_output_dir": True,
+            "overwrite_cache": True,
+            "do_lower_case": True,
+            "max_seq_length": 512,
+            "seed": 42,
+            "gpu": "",
+            "per_gpu_train_batch_size": 4,
+            "per_gpu_eval_batch_size": 1,
+            "num_train_epochs": 10,
+            "gradient_accumulation_steps": 1,
+            "warmup_steps": 400,
+            "learning_rate": 6e-6,
+            "weight_decay": 0.01,
+            "adam_epsilon": 1e-8,
+            "max_grad_norm": 1.0,
+            "local_rank": -1,
+        }
+        # Save default config for future use
+        with open(config_file, "w") as f:
+            json.dump(config, f, indent=4)
 
-    # Required parameters
-    parser.add_argument("--data_name", default="cb", type=str, help="dataset name")
-    parser.add_argument(
-        "--set_name", default="valid", type=str, help="dataset split name"
-    )
-    parser.add_argument("--model_name", default="roberta", type=str, help="model name")
-    parser.add_argument(
-        "--model_name_or_path",
-        default="roberta-large",
-        type=str,
-        help="model name or path",
-    )
-    parser.add_argument(
-        "--output_dir",
-        default="models",
-        type=str,
-        help="The output directory where the model predictions and checkpoints will be written.",
-    )
-    parser.add_argument(
-        "--data_dir", default="./data", type=str, help="The data directory."
-    )
-    parser.add_argument(
-        "--cache_dir",
-        default="./cache",
-        type=str,
-        help="The cache directory.",
-    )
-
-    # Other parameters
-    parser.add_argument(
-        "--do_train", action="store_true", help="Whether to run training."
-    )
-    parser.add_argument("--do_eval", action="store_true", help="Whether to run eval.")
-    parser.add_argument(
-        "--overwrite_output_dir",
-        action="store_true",
-        help="Overwrite the content of the output directory",
-    )
-    parser.add_argument(
-        "--overwrite_cache",
-        action="store_true",
-        help="Overwrite the cached training and evaluation sets",
-    )
-    parser.add_argument(
-        "--do_lower_case",
-        action="store_false",
-        help="Set this flag if you are using an uncased model.",
-    )
-    parser.add_argument(
-        "--max_seq_length",
-        default=512,
-        type=int,
-        help="The maximum total input sequence length after tokenization. Sequences longer "
-        "than this will be truncated, sequences shorter will be padded.",
-    )
-    parser.add_argument(
-        "--seed", type=int, default=42, help="random seed for initialization"
-    )
-    parser.add_argument("--gpu", default="", type=str, help="Use CUDA on the device.")
-    parser.add_argument(
-        "--per_gpu_train_batch_size",
-        default=2,
-        type=int,
-        help="Batch size per GPU/CPU for training.",
-    )
-    parser.add_argument(
-        "--per_gpu_eval_batch_size",
-        default=1,
-        type=int,
-        help="Batch size per GPU/CPU for evaluation.",
-    )
-    parser.add_argument(
-        "--num_train_epochs",
-        default=10,
-        type=float,
-        help="Total number of training epochs to perform.",
-    )
-    parser.add_argument(
-        "--gradient_accumulation_steps",
-        type=int,
-        default=1,
-        help="Number of updates steps to accumulate before performing a backward/update pass.",
-    )
-    parser.add_argument(
-        "--warmup_steps", default=400, type=int, help="Linear warmup over warmup_steps."
-    )
-    parser.add_argument(
-        "--learning_rate",
-        default=6e-6,
-        type=float,
-        help="The initial learning rate for Adam.",
-    )
-    parser.add_argument(
-        "--weight_decay",
-        default=0.01,
-        type=float,
-        help="Weight decay if we apply some.",
-    )
-    parser.add_argument(
-        "--adam_epsilon", default=1e-8, type=float, help="Epsilon for Adam optimizer."
-    )
-    parser.add_argument(
-        "--max_grad_norm", default=1.0, type=float, help="Max gradient norm."
-    )
-    parser.add_argument("--local_rank", default=-1, type=int, help="DDP requirement.")
-
-    args = parser.parse_args()
+    # Convert config dict to Namespace for compatibility
+    args = argparse.Namespace(**config)
 
     # Set up output directory
     args.output_dir = os.path.join(args.output_dir, args.data_name, args.model_name)
@@ -417,6 +346,7 @@ def main():
     model = PPDPP(args, config, tokenizer)
 
     # Load and prepare the training dataset
+    # This is one place to change: read just DAs (and maybe the last textual message)
     train_dataset = data_reader.load_and_cache_examples(args, tokenizer, evaluate=False)
 
     # Move the model to the specified device (CPU/GPU)
@@ -426,6 +356,7 @@ def main():
     output_dir = os.path.join(args.output_dir, "best_checkpoint")
 
     # Training
+    # switch to taining HF API
     if args.do_train:
         global_step, tr_loss = train(args, train_dataset, model, tokenizer)
         logging.info(" global_step = %s, average loss = %s", global_step, tr_loss)
